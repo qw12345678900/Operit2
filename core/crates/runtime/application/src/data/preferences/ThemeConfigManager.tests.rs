@@ -1807,3 +1807,99 @@ fn startup_appearance_migration_synchronizes_without_rewriting_old_history() {
         assert_eq!(target.bytes(), before);
     }
 }
+
+// ===== PROBE TESTS (rust-analyst) =====
+
+/// Probe T1: a genuinely empty store must migrate to a self-consistent active theme.
+#[test]
+fn probe_fresh_install_migration_preserves_snapshot_invariant() {
+    let fixture = StoreFixture::new();
+    migrateAppearance(&fixture).unwrap();
+    let manager = fixture.manager();
+    let active = manager.getActive().unwrap().expect("fresh install must create an active theme");
+    assert_eq!(manager.list().unwrap(), vec![active.clone()]);
+    assertThemePreferenceSnapshot(&fixture.preferences().data().unwrap(), &active.snapshot).unwrap();
+    let prefs = fixture.preferences().data().unwrap();
+    assert_eq!(prefs.get(&stringPreferencesKey("bubble_wide_layout_enabled")), Some(&json!(false)));
+}
+
+/// Probe T2: a single out-of-band ordinary preference write reproduces the online error verbatim.
+#[test]
+fn probe_stray_ordinary_preference_write_reproduces_reported_error() {
+    let fixture = StoreFixture::new();
+    migrateAppearance(&fixture).unwrap();
+    fixture.preferences().edit(|prefs| {
+        prefs.set(&stringPreferencesKey("bubble_wide_layout_enabled"), json!(true));
+    }).unwrap();
+    let err = fixture.manager().getActive().unwrap_err().to_string();
+    assert!(err.contains("Invalid theme snapshot field bubbleWideLayoutEnabled"), "{err}");
+    assert!(err.contains("active ordinary preference differs from its saved configuration"), "{err}");
+}
+
+/// Probe T3: a Flutter-style partial patch (Dart default initial snapshot) stays consistent.
+#[test]
+fn probe_flutter_style_patch_stays_consistent() {
+    let fixture = StoreFixture::new();
+    migrateAppearance(&fixture).unwrap();
+    let manager = fixture.manager();
+    manager.patchAppearance(
+        snapshot(),
+        BTreeMap::from([("theme_mode".to_string(), json!("light"))]),
+        vec![],
+    ).unwrap();
+    let active = manager.getActive().unwrap().unwrap();
+    assert_eq!(active.snapshot["themeMode"], json!("light"));
+    assertThemePreferenceSnapshot(&fixture.preferences().data().unwrap(), &active.snapshot).unwrap();
+    let reopened = fixture.manager();
+    let again = reopened.getActive().unwrap().unwrap();
+    assert_eq!(again, active);
+}
+
+/// Probe T4: startup synchronization preparation (empty incoming) must not corrupt a fresh install.
+#[test]
+fn probe_startup_sync_prepare_keeps_fresh_install_consistent() {
+    let fixture = StoreFixture::new();
+    migrateAppearance(&fixture).unwrap();
+    let before = fixture.preferences().data().unwrap();
+    let active = fixture.manager().getActive().unwrap().unwrap();
+    let schema = super::super::PreferenceSpaceMerge::schema();
+    let outcomes = operit_store::PreferenceMerge::applyIndependentOperations(
+        fixture.host.clone(),
+        &schema,
+        &[],
+        &[],
+        |_, _| true,
+    );
+    for outcome in &outcomes {
+        assert!(outcome.result.is_ok(), "prepare failed: {:?}", outcome.result);
+    }
+    assert_eq!(fixture.manager().getActive().unwrap(), Some(active.clone()));
+    assertThemePreferenceSnapshot(&fixture.preferences().data().unwrap(), &active.snapshot).unwrap();
+    assert_eq!(fixture.preferences().data().unwrap().values, before.values);
+}
+
+/// Probe T5: replaying a fresh install's history into another fresh device keeps both sides consistent.
+#[test]
+fn probe_replicated_fresh_install_keeps_snapshot_consistent() {
+    use operit_store::SyncOperationStore::{SyncClock, SyncOperationStore};
+    use operit_util::RuntimeStorageLayout::RUNTIME_SYNC_DIR_PATH;
+    let source = StoreFixture::new();
+    migrateAppearance(&source).unwrap();
+    let expected = source.manager().getActive().unwrap().unwrap();
+    let journal = SyncOperationStore::new(source.host.clone(), RUNTIME_SYNC_DIR_PATH);
+    let operations = journal.operationsSince(&SyncClock::empty(), &["preferences".into()], 4096).unwrap();
+    let target = StoreFixture::new();
+    target.preferences().data().unwrap();
+    for _ in 0..2 {
+        let history = SyncOperationStore::new(target.host.clone(), RUNTIME_SYNC_DIR_PATH)
+            .preferenceHistory().unwrap();
+        operit_store::PreferenceMerge::applyOperations(
+            target.host.clone(),
+            &super::super::PreferenceSpaceMerge::schema(),
+            &history,
+            &operations,
+            |_, _| true,
+        ).unwrap();
+        assert_eq!(target.manager().getActive().unwrap(), Some(expected.clone()));
+    }
+}
