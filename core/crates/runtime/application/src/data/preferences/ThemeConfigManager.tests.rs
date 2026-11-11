@@ -1875,7 +1875,7 @@ fn probe_startup_sync_prepare_keeps_fresh_install_consistent() {
     }
     assert_eq!(fixture.manager().getActive().unwrap(), Some(active.clone()));
     assertThemePreferenceSnapshot(&fixture.preferences().data().unwrap(), &active.snapshot).unwrap();
-    assert_eq!(fixture.preferences().data().unwrap().values, before.values);
+    assert_eq!(fixture.preferences().data().unwrap(), before);
 }
 
 /// Probe T5: replaying a fresh install's history into another fresh device keeps both sides consistent.
