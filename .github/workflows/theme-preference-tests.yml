@@ -1,0 +1,68 @@
+name: Theme Preference Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: "cargo test name filter (optional)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  theme-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTFLAGS: -Awarnings
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          rustc -Vv
+          cargo -V
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: theme-tests-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: theme-tests-
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install built-in workflow plugin dependencies
+        working-directory: plugins/packages/buildin/workflow
+        run: |
+          corepack enable pnpm
+          corepack pnpm install --frozen-lockfile
+
+      - name: Pin the TypeScript compiler required by plugin builds
+        run: npm install --global typescript@5.9.2
+
+      - name: Prepare runtime plugin assets
+        run: python3 plugins/tools/sync_plugin_packages.py --source runtime --no-hot-reload
+
+      - name: Theme preference regression tests
+        working-directory: core
+        run: |
+          LIVE_OUTPUT="$(mktemp)"
+          if ! cargo test -p operit-runtime --lib -- ThemeConfigManager --test-threads=1 2>&1 | tee "$LIVE_OUTPUT"; then
+            echo "cargo test failed"
+          fi
+          tail -n 300 "$LIVE_OUTPUT"
+          grep -q "test result: ok" "$LIVE_OUTPUT"

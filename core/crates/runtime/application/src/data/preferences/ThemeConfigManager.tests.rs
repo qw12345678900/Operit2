@@ -1807,3 +1807,137 @@ fn startup_appearance_migration_synchronizes_without_rewriting_old_history() {
         assert_eq!(target.bytes(), before);
     }
 }
+
+
+/// Repairs ordinary appearance written by another owner instead of keeping the theme library unreadable.
+#[test]
+fn startup_reconciliation_repairs_a_stray_ordinary_preference() {
+    let fixture = StoreFixture::new();
+    migrateAppearance(&fixture).unwrap();
+    let manager = fixture.manager();
+    let active = manager.getActive().unwrap().unwrap();
+    assert_eq!(active.snapshot["bubbleWideLayoutEnabled"], json!(false));
+    fixture
+        .preferences()
+        .edit(|values| {
+            values.set(&stringPreferencesKey("bubble_wide_layout_enabled"), true);
+        })
+        .unwrap();
+    assert!(manager.getActive().is_err());
+    assert!(manager.watch().first().is_err());
+    migrateAppearance(&fixture).unwrap();
+    assert_eq!(manager.getActive().unwrap(), Some(active.clone()));
+    assert_eq!(
+        manager.watch().first().unwrap().activeThemeConfigId,
+        Some(active.id.clone())
+    );
+    let values = fixture.preferences().data().unwrap();
+    assertThemePreferenceSnapshot(&values, &active.snapshot).unwrap();
+}
+
+/// Restores absent ordinary keys and removes the obsolete system-theme override.
+#[test]
+fn startup_reconciliation_repairs_missing_and_obsolete_ordinary_preferences() {
+    let fixture = StoreFixture::new();
+    migrateAppearance(&fixture).unwrap();
+    let manager = fixture.manager();
+    let mut dark = manager.getActive().unwrap().unwrap();
+    dark.snapshot.insert("themeMode".into(), json!("dark"));
+    manager
+        .update(dark.id.clone(), dark.name.clone(), dark.snapshot.clone())
+        .unwrap();
+    fixture
+        .preferences()
+        .edit(|values| {
+            values.remove(&stringPreferencesKey("bubble_show_avatar"));
+            values.remove(&stringPreferencesKey("background_image_opacity"));
+            values.set(&stringPreferencesKey("use_system_theme"), true);
+        })
+        .unwrap();
+    assert!(manager.getActive().is_err());
+    migrateAppearance(&fixture).unwrap();
+    let values = fixture.preferences().data().unwrap();
+    assertThemePreferenceSnapshot(&values, &dark.snapshot).unwrap();
+    assert_eq!(
+        values.get(&stringPreferencesKey("theme_mode")),
+        Some(&json!("dark"))
+    );
+    assert!(!values.contains(&stringPreferencesKey("use_system_theme")));
+}
+
+/// Replaces an invalid ordinary value with the saved scalar type instead of failing forever.
+#[test]
+fn startup_reconciliation_replaces_invalid_ordinary_values() {
+    let fixture = StoreFixture::new();
+    migrateAppearance(&fixture).unwrap();
+    let manager = fixture.manager();
+    let active = manager.getActive().unwrap().unwrap();
+    fixture
+        .preferences()
+        .edit(|values| {
+            values.set(&stringPreferencesKey("bubble_wide_layout_enabled"), "true");
+        })
+        .unwrap();
+    assert!(manager.getActive().is_err());
+    migrateAppearance(&fixture).unwrap();
+    let values = fixture.preferences().data().unwrap();
+    assert_eq!(
+        values.get(&stringPreferencesKey("bubble_wide_layout_enabled")),
+        Some(&json!(false))
+    );
+    assertThemePreferenceSnapshot(&values, &active.snapshot).unwrap();
+}
+
+/// Keeps ordinary custom appearance authoritative and leaves a consistent selection untouched.
+#[test]
+fn startup_reconciliation_leaves_consistent_and_custom_appearance_untouched() {
+    let fixture = StoreFixture::new();
+    migrateAppearance(&fixture).unwrap();
+    let writes = fixture.writes();
+    for _ in 0..2 {
+        migrateAppearance(&fixture).unwrap();
+    }
+    assert_eq!(fixture.writes(), writes);
+    let manager = fixture.manager();
+    manager.useCustomAppearance(snapshot()).unwrap();
+    fixture
+        .preferences()
+        .edit(|values| {
+            values.set(&stringPreferencesKey("bubble_wide_layout_enabled"), true);
+        })
+        .unwrap();
+    let before = fixture.bytes();
+    migrateAppearance(&fixture).unwrap();
+    assert_eq!(fixture.bytes(), before);
+    assert_eq!(manager.getActive().unwrap(), None);
+}
+
+/// Preserves saved configurations and retries the same repair after a failed write.
+#[test]
+fn startup_reconciliation_preserves_the_catalog_and_retries_after_failure() {
+    let fixture = StoreFixture::new();
+    migrateAppearance(&fixture).unwrap();
+    let manager = fixture.manager();
+    let catalog = manager.list().unwrap();
+    fixture
+        .preferences()
+        .edit(|values| {
+            values.set(&stringPreferencesKey("bubble_wide_layout_enabled"), true);
+        })
+        .unwrap();
+    let before = fixture.bytes();
+    fixture
+        .host
+        .failPreferenceWrite
+        .store(true, Ordering::SeqCst);
+    assert!(migrateAppearance(&fixture).is_err());
+    assert_eq!(fixture.bytes(), before);
+    fixture
+        .host
+        .failPreferenceWrite
+        .store(false, Ordering::SeqCst);
+    migrateAppearance(&fixture).unwrap();
+    assert_eq!(manager.list().unwrap(), catalog);
+    let values = fixture.preferences().data().unwrap();
+    assertThemePreferenceSnapshot(&values, &catalog[0].snapshot).unwrap();
+}

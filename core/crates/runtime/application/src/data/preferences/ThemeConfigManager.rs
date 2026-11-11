@@ -373,6 +373,28 @@ pub(super) fn migrateUnboundAppearance(
     writeState(preferences, &state)
 }
 
+/// Repairs an active named configuration whose ordinary appearance was written by another owner.
+/// The saved named configuration is the source of truth; a failed repair never publishes partial data.
+pub(super) fn reconcileActiveAppearance(
+    preferences: &mut Preferences,
+) -> Result<(), PreferencesDataStoreError> {
+    let state = readCatalogState(preferences)?;
+    let Some(id) = state.activeThemeConfigId.clone() else {
+        // Explicit custom appearance owns ordinary preferences and is never rewritten.
+        return Ok(());
+    };
+    let config = findConfig(&state, &id)?.clone();
+    if assertThemePreferenceSnapshot(preferences, &config.snapshot).is_ok() {
+        return Ok(());
+    }
+    // Stage the complete ordinary appearance so a failed validation cannot publish a partial repair.
+    let mut staged = preferences.clone();
+    writeThemePreferenceSnapshot(&mut staged, &config.snapshot)?;
+    assertThemePreferenceSnapshot(&staged, &config.snapshot)?;
+    *preferences = staged;
+    Ok(())
+}
+
 /// Decodes saved configurations independently of the ordinary appearance being replaced.
 fn readCatalogState(preferences: &Preferences) -> Result<ThemeConfigState, PreferencesDataStoreError> {
     // Each identity has its own synchronized record; malformed records remain errors.
