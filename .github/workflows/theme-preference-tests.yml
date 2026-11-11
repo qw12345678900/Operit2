@@ -1,0 +1,54 @@
+name: Theme Preference Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      filter:
+        description: "cargo test name filter (optional)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      RUSTFLAGS: -Awarnings
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          rustc -Vv
+          cargo -V
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: theme-tests-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: theme-tests-
+
+      - name: Preference store tests
+        working-directory: core
+        run: cargo test -p operit-store --lib 2>&1 | tail -n 120
+
+      - name: Runtime preference and theme tests
+        working-directory: core
+        run: |
+          if [ -n "${{ inputs.filter }}" ]; then
+            cargo test -p operit-runtime --lib -- "${{ inputs.filter }}" 2>&1 | tail -n 200
+          else
+            cargo test -p operit-runtime --lib -- data::preferences 2>&1 | tail -n 200
+          fi
